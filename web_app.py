@@ -99,7 +99,6 @@ INDEX_HTML = """<!DOCTYPE html>
                             <i class="fas fa-compass"></i>
                         </div>
                         <input type="url" id="novelUrl" 
-                               value="https://novelfire.net/book/the-golden-lord-has-a-perverted-sss-rank-summoning-system" 
                                placeholder="e.g. https://novelfire.net/book/... or https://www.wuxiaspot.com/novel/..." 
                                class="w-full pl-11 pr-4 py-3.5 bg-slate-950/80 border border-slate-800 rounded-2xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent text-sm transition">
                     </div>

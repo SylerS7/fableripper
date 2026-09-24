@@ -36,8 +36,11 @@ class NovelPipeline:
         if self.use_cache and not force_refresh:
             cached_meta = self.cache.load_metadata()
             if cached_meta:
-                # If cached under the same scraper platform and has chapters, use it
-                if cached_meta.get("platform") == self.scraper.name and len(cached_meta.get("chapters", [])) > 1:
+                # Use cache only if: same platform, has chapters, and has description
+                same_platform = cached_meta.get("platform") == self.scraper.name
+                has_chapters = len(cached_meta.get("chapters", [])) > 1
+                has_description = bool(cached_meta.get("description", "").strip())
+                if same_platform and has_chapters and has_description:
                     return NovelMetadata.from_dict(cached_meta)
 
         self._notify(f"Detecting platform: [{self.scraper.name}] - Fetching novel info...", 0.05)
