@@ -1,7 +1,9 @@
 from .base import BaseScraper, NovelMetadata, ChapterInfo, ChapterContent
+from .fetcher import BotProtectionError, smart_fetch
 from .wuxiaspot import WuxiaSpotScraper
 from .royalroad import RoyalRoadScraper
 from .novelfull import NovelFullScraper
+from .novelfire import NovelFireScraper
 from .universal import UniversalScraper
 from typing import List
 
@@ -10,6 +12,7 @@ SCRAPERS: List[BaseScraper] = [
     WuxiaSpotScraper(),
     RoyalRoadScraper(),
     NovelFullScraper(),
+    NovelFireScraper(),
     UniversalScraper(),
 ]
 
@@ -24,9 +27,11 @@ __all__ = [
     "NovelMetadata",
     "ChapterInfo",
     "ChapterContent",
+    "BotProtectionError",
     "WuxiaSpotScraper",
     "RoyalRoadScraper",
     "NovelFullScraper",
+    "NovelFireScraper",
     "UniversalScraper",
     "get_scraper_for_url",
 ]

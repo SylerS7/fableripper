@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify, render_template_string, Response, sen
 
 from config import DEFAULT_CONCURRENCY, OUTPUT_DIR, CACHE_DIR, IS_VERCEL
 from engine import NovelPipeline
-from scraper import get_scraper_for_url, NovelMetadata, ChapterInfo, ChapterContent
+from scraper import get_scraper_for_url, NovelMetadata, ChapterInfo, ChapterContent, BotProtectionError
 from epub import NovelExporter
 
 app = Flask(__name__)
@@ -47,8 +47,11 @@ INDEX_HTML = """<!DOCTYPE html>
                     <span class="hidden sm:inline-block ml-2 text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700/60">Universal Scraper & Reader</span>
                 </div>
             </div>
-            <div class="flex items-center gap-3 text-xs text-slate-400">
-                <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Multi-Platform Ready</span>
+            <div class="flex items-center gap-3 text-xs">
+                <button onclick="openPasteModal()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 flex items-center gap-1.5 transition">
+                    <i class="fas fa-paste"></i>
+                    <span>Paste Text to EPUB</span>
+                </button>
             </div>
         </div>
     </header>
@@ -61,8 +64,23 @@ INDEX_HTML = """<!DOCTYPE html>
                 <span class="bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 bg-clip-text text-transparent">Web Novel to EPUB</span>
             </h1>
             <p class="text-slate-400 text-sm sm:text-base leading-relaxed">
-                Paste any novel or chapter URL. Supports <span class="text-cyan-300 font-medium">WuxiaSpot</span>, <span class="text-cyan-300 font-medium">Royal Road</span>, <span class="text-cyan-300 font-medium">NovelFull</span>, or <span class="text-cyan-300 font-medium">Any Web Fiction Site</span>. Read live or export to Kindle-ready EPUB, TXT, or Markdown.
+                Paste any novel or chapter URL. Supports <span class="text-cyan-300 font-medium">WuxiaSpot</span>, <span class="text-cyan-300 font-medium">NovelFire</span>, <span class="text-cyan-300 font-medium">Royal Road</span>, <span class="text-cyan-300 font-medium">NovelFull</span>, and any standard web fiction site.
             </p>
+        </div>
+
+        <!-- Global In-App Error Banner -->
+        <div id="errorBanner" class="hidden max-w-4xl mx-auto mb-6 p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-sm flex items-start justify-between gap-3 shadow-lg">
+            <div class="flex items-start gap-3">
+                <div class="text-rose-400 text-lg mt-0.5"><i class="fas fa-triangle-exclamation"></i></div>
+                <div>
+                    <h4 class="font-bold text-rose-300" id="errorTitle">Notice</h4>
+                    <p class="text-xs text-rose-200/90 mt-0.5 leading-relaxed" id="errorMessage"></p>
+                    <div id="errorSuggestion" class="hidden mt-2 text-xs bg-rose-950/40 p-2.5 rounded-xl border border-rose-800/40 text-rose-300"></div>
+                </div>
+            </div>
+            <button onclick="dismissError()" class="text-rose-400 hover:text-white p-1 text-sm">
+                <i class="fas fa-times"></i>
+            </button>
         </div>
 
         <!-- Main Input Card -->
@@ -81,8 +99,8 @@ INDEX_HTML = """<!DOCTYPE html>
                             <i class="fas fa-compass"></i>
                         </div>
                         <input type="url" id="novelUrl" 
-                               value="https://www.wuxiaspot.com/novel/battle-through-the-heavens.html" 
-                               placeholder="e.g. https://www.wuxiaspot.com/novel/battle-through-the-heavens.html or royalroad.com..." 
+                               value="https://novelfire.net/book/the-golden-lord-has-a-perverted-sss-rank-summoning-system" 
+                               placeholder="e.g. https://novelfire.net/book/... or https://www.wuxiaspot.com/novel/..." 
                                class="w-full pl-11 pr-4 py-3.5 bg-slate-950/80 border border-slate-800 rounded-2xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent text-sm transition">
                     </div>
                     <button id="inspectBtn" onclick="inspectNovel()" class="px-7 py-3.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold rounded-2xl shadow-lg shadow-cyan-500/20 transition duration-150 flex items-center justify-center gap-2 cursor-pointer">
@@ -153,9 +171,9 @@ INDEX_HTML = """<!DOCTYPE html>
                             <label class="block text-xs font-medium text-slate-400 mb-1.5">Volume Split</label>
                             <select id="volumeSplit" class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:ring-1 focus:ring-cyan-500 focus:outline-none">
                                 <option value="0" selected>Single File (All in 1)</option>
+                                <option value="50">Split every 50 chapters</option>
                                 <option value="100">Split every 100 chapters</option>
                                 <option value="200">Split every 200 chapters</option>
-                                <option value="500">Split every 500 chapters</option>
                             </select>
                         </div>
                     </div>
@@ -211,17 +229,17 @@ INDEX_HTML = """<!DOCTYPE html>
                 <p class="text-[11px] text-slate-500 mt-0.5">Xianxia & Wuxia</p>
             </div>
             <div class="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 text-center">
+                <div class="text-orange-400 text-lg mb-1"><i class="fas fa-fire"></i></div>
+                <h4 class="text-xs font-bold text-slate-200">NovelFire</h4>
+                <p class="text-[11px] text-slate-500 mt-0.5">Full Web Novels</p>
+            </div>
+            <div class="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 text-center">
                 <div class="text-purple-400 text-lg mb-1"><i class="fas fa-crown"></i></div>
                 <h4 class="text-xs font-bold text-slate-200">Royal Road</h4>
                 <p class="text-[11px] text-slate-500 mt-0.5">LitRPG & Fantasy</p>
             </div>
             <div class="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 text-center">
-                <div class="text-blue-400 text-lg mb-1"><i class="fas fa-book"></i></div>
-                <h4 class="text-xs font-bold text-slate-200">NovelFull</h4>
-                <p class="text-[11px] text-slate-500 mt-0.5">Web Light Novels</p>
-            </div>
-            <div class="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 text-center">
-                <div class="text-amber-400 text-lg mb-1"><i class="fas fa-globe"></i></div>
+                <div class="text-blue-400 text-lg mb-1"><i class="fas fa-globe"></i></div>
                 <h4 class="text-xs font-bold text-slate-200">Universal Mode</h4>
                 <p class="text-[11px] text-slate-500 mt-0.5">Any Novel Link</p>
             </div>
@@ -230,7 +248,6 @@ INDEX_HTML = """<!DOCTYPE html>
 
     <!-- IN-BROWSER READER MODAL -->
     <div id="readerModal" class="hidden fixed inset-0 z-50 bg-slate-950 flex flex-col">
-        <!-- Reader Header -->
         <div id="readerHeader" class="h-14 border-b border-slate-800 bg-slate-900/90 backdrop-blur px-4 flex items-center justify-between flex-shrink-0">
             <div class="flex items-center gap-3 overflow-hidden">
                 <button onclick="closeReaderModal()" class="text-slate-400 hover:text-white p-2 rounded-lg">
@@ -243,28 +260,20 @@ INDEX_HTML = """<!DOCTYPE html>
             </div>
             
             <div class="flex items-center gap-2">
-                <!-- Chapter Selector Dropdown -->
                 <select id="readerChapterSelect" onchange="onReaderChapterChange(this.value)" class="text-xs bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none max-w-[130px] sm:max-w-[200px] truncate">
                 </select>
-
-                <!-- Font size controls -->
                 <button onclick="changeFontSize(-1)" class="p-1.5 text-slate-400 hover:text-white text-xs">A-</button>
                 <button onclick="changeFontSize(1)" class="p-1.5 text-slate-400 hover:text-white text-xs">A+</button>
-                
-                <!-- Close Button -->
                 <button onclick="closeReaderModal()" class="text-slate-400 hover:text-white p-2 text-sm ml-1">
                     <i class="fas fa-times"></i>
                 </button>
             </div>
         </div>
 
-        <!-- Reader Scroll Content Area -->
         <div id="readerContentContainer" class="flex-1 overflow-y-auto px-4 py-8">
             <div id="readerBody" class="max-w-2xl mx-auto reader-text text-base sm:text-lg leading-relaxed text-slate-200 space-y-6">
-                <!-- Dynamic Chapter Content Injected Here -->
             </div>
 
-            <!-- Bottom Navigation -->
             <div class="max-w-2xl mx-auto mt-12 pt-6 border-t border-slate-800 flex items-center justify-between">
                 <button id="readerPrevBtn" onclick="navigateChapter(-1)" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center gap-2">
                     <i class="fas fa-chevron-left"></i> Previous
@@ -276,14 +285,70 @@ INDEX_HTML = """<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- QUICK PASTE TEXT MODAL -->
+    <div id="pasteModal" class="hidden fixed inset-0 z-50 bg-slate-950/80 backdrop-blur flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-3xl max-w-xl w-full p-6 shadow-2xl space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-lg font-bold text-white flex items-center gap-2">
+                    <i class="fas fa-file-lines text-cyan-400"></i> Paste Text or Chapter to EPUB
+                </h3>
+                <button onclick="closePasteModal()" class="text-slate-400 hover:text-white"><i class="fas fa-times"></i></button>
+            </div>
+            <p class="text-xs text-slate-400">
+                Paste any text or chapter directly (useful for bot-protected sites like AO3, private chapters, or drafts).
+            </p>
+            <div class="space-y-3 text-xs">
+                <div>
+                    <label class="block text-slate-400 mb-1">Novel Title</label>
+                    <input type="text" id="pasteNovelTitle" placeholder="Novel Title" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100">
+                </div>
+                <div>
+                    <label class="block text-slate-400 mb-1">Author</label>
+                    <input type="text" id="pasteAuthor" placeholder="Author Name" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100">
+                </div>
+                <div>
+                    <label class="block text-slate-400 mb-1">Chapter Title</label>
+                    <input type="text" id="pasteChapterTitle" placeholder="Chapter 1" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100">
+                </div>
+                <div>
+                    <label class="block text-slate-400 mb-1">Chapter Content (Plain text or HTML)</label>
+                    <textarea id="pasteContent" rows="8" placeholder="Paste story text here..." class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 font-mono text-xs"></textarea>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 pt-2">
+                <button onclick="closePasteModal()" class="px-4 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs">Cancel</button>
+                <button onclick="submitPastedEpub()" class="px-5 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-xl text-xs font-semibold">Generate EPUB</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let inspectedNovel = null;
         let currentReaderChapterIndex = 0;
         let readerFontSize = 18;
 
+        function showError(title, message, suggestion = '') {
+            document.getElementById('errorTitle').innerText = title;
+            document.getElementById('errorMessage').innerText = message;
+            const suggEl = document.getElementById('errorSuggestion');
+            if (suggestion) {
+                suggEl.innerHTML = suggestion;
+                suggEl.classList.remove('hidden');
+            } else {
+                suggEl.classList.add('hidden');
+            }
+            document.getElementById('errorBanner').classList.remove('hidden');
+            document.getElementById('errorBanner').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function dismissError() {
+            document.getElementById('errorBanner').classList.add('hidden');
+        }
+
         async function inspectNovel() {
+            dismissError();
             const url = document.getElementById('novelUrl').value.trim();
-            if (!url) return alert('Please enter a novel URL');
+            if (!url) return showError('Input Required', 'Please enter a valid novel or chapter URL.');
 
             const btn = document.getElementById('inspectBtn');
             btn.disabled = true;
@@ -296,7 +361,20 @@ INDEX_HTML = """<!DOCTYPE html>
                     body: JSON.stringify({ url })
                 });
                 const data = await res.json();
-                if (!res.ok) throw new Error(data.error || 'Failed to inspect novel');
+                
+                if (!res.ok) {
+                    if (data.is_bot_protected) {
+                        showError(
+                            'Bot Protection Detected (' + (data.platform || 'Protected Site') + ')',
+                            data.error,
+                            '💡 <b>Tip:</b> Sites like Archive of Our Own (AO3) or Cloudflare-protected platforms block automated scrapers.<br>' +
+                            'You can download directly from their page, or click <b>"Paste Text to EPUB"</b> at the top right to instantly package your copied text into a styled EPUB!'
+                        );
+                    } else {
+                        showError('Scraping Error', data.error || 'Failed to inspect novel');
+                    }
+                    return;
+                }
 
                 inspectedNovel = data;
 
@@ -312,7 +390,6 @@ INDEX_HTML = """<!DOCTYPE html>
                     document.getElementById('novelCover').src = 'https://via.placeholder.com/300x450?text=No+Cover';
                 }
 
-                // Tags
                 const tagsContainer = document.getElementById('novelTags');
                 tagsContainer.innerHTML = '';
                 (data.categories || []).forEach(cat => {
@@ -325,7 +402,6 @@ INDEX_HTML = """<!DOCTYPE html>
                 document.getElementById('startCh').value = 1;
                 document.getElementById('endCh').placeholder = `Max (${data.chapters.length})`;
 
-                // Populate reader chapter dropdown
                 const select = document.getElementById('readerChapterSelect');
                 select.innerHTML = '';
                 (data.chapters || []).forEach((ch, idx) => {
@@ -339,7 +415,7 @@ INDEX_HTML = """<!DOCTYPE html>
                 document.getElementById('detectedPlatformBadge').innerText = data.platform;
                 document.getElementById('detectedPlatformBadge').classList.remove('hidden');
             } catch (err) {
-                alert('Scraper Error: ' + err.message);
+                showError('Network Error', err.message);
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i><span>Inspect Novel</span>';
@@ -347,7 +423,8 @@ INDEX_HTML = """<!DOCTYPE html>
         }
 
         async function startExport() {
-            if (!inspectedNovel) return alert('Please inspect a novel first.');
+            dismissError();
+            if (!inspectedNovel) return showError('Select Novel', 'Please inspect a novel first.');
 
             const startVal = document.getElementById('startCh').value;
             const endVal = document.getElementById('endCh').value;
@@ -365,14 +442,12 @@ INDEX_HTML = """<!DOCTYPE html>
             document.getElementById('downloadReadyBox').classList.add('hidden');
             document.getElementById('progressBar').style.width = '5%';
             document.getElementById('progressPercent').innerText = '5%';
-            document.getElementById('progressMessage').innerText = 'Starting client-orchestrated fetch...';
+            document.getElementById('progressMessage').innerText = 'Starting chunked chapter fetch...';
 
             try {
-                // Filter chapters to export
                 const chaptersToFetch = inspectedNovel.chapters.filter(ch => ch.number >= startCh && ch.number <= endCh);
                 if (chaptersToFetch.length === 0) throw new Error('No chapters in the selected range.');
 
-                // Batch fetch chapters (Vercel-safe chunking)
                 const batchSize = 6;
                 const fetchedChapters = [];
                 const total = chaptersToFetch.length;
@@ -395,7 +470,6 @@ INDEX_HTML = """<!DOCTYPE html>
                     document.getElementById('progressPercent').innerText = pct + '%';
                 }
 
-                // Send assembled chapters to export endpoint
                 document.getElementById('progressMessage').innerText = `Building ${fmt.toUpperCase()} document...`;
                 document.getElementById('progressBar').style.width = '90%';
                 document.getElementById('progressPercent').innerText = '90%';
@@ -422,16 +496,16 @@ INDEX_HTML = """<!DOCTYPE html>
                 document.getElementById('downloadLink').href = '/api/file/' + encodeURIComponent(exportData.filename);
                 document.getElementById('downloadReadyBox').classList.remove('hidden');
             } catch (err) {
-                alert('Export failed: ' + err.message);
+                showError('Export Failed', err.message);
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fas fa-cloud-arrow-down"></i><span>Download E-Book</span>';
             }
         }
 
-        // ================= READER MODAL FUNCTIONS =================
+        // ================= READER MODAL =================
         function openReaderModal() {
-            if (!inspectedNovel || !inspectedNovel.chapters.length) return alert('No chapters available');
+            if (!inspectedNovel || !inspectedNovel.chapters.length) return showError('No Chapters', 'No chapters available to read.');
             document.getElementById('readerNovelTitle').innerText = inspectedNovel.title;
             document.getElementById('readerModal').classList.remove('hidden');
             loadReaderChapter(0);
@@ -465,7 +539,6 @@ INDEX_HTML = """<!DOCTYPE html>
                     ${(data.paragraphs || []).map(p => `<p class="leading-relaxed mb-4">${p}</p>`).join('')}
                 `;
 
-                // Update prev/next button states
                 document.getElementById('readerPrevBtn').disabled = idx === 0;
                 document.getElementById('readerNextBtn').disabled = idx === inspectedNovel.chapters.length - 1;
             } catch (err) {
@@ -488,6 +561,45 @@ INDEX_HTML = """<!DOCTYPE html>
             readerFontSize = Math.max(14, Math.min(28, readerFontSize + delta * 2));
             document.getElementById('readerBody').style.fontSize = readerFontSize + 'px';
         }
+
+        // ================= PASTE MODAL =================
+        function openPasteModal() {
+            document.getElementById('pasteModal').classList.remove('hidden');
+        }
+
+        function closePasteModal() {
+            document.getElementById('pasteModal').classList.add('hidden');
+        }
+
+        async function submitPastedEpub() {
+            const title = document.getElementById('pasteNovelTitle').value.trim() || 'Custom Story';
+            const author = document.getElementById('pasteAuthor').value.trim() || 'Author';
+            const chTitle = document.getElementById('pasteChapterTitle').value.trim() || 'Chapter 1';
+            const content = document.getElementById('pasteContent').value.trim();
+
+            if (!content) return alert('Please paste some content.');
+
+            const res = await fetch('/api/quick-convert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title,
+                    author,
+                    chapter_title: chTitle,
+                    content
+                })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                closePasteModal();
+                document.getElementById('downloadFilename').innerText = data.filename;
+                document.getElementById('downloadLink').href = '/api/file/' + encodeURIComponent(data.filename);
+                document.getElementById('downloadReadyBox').classList.remove('hidden');
+                document.getElementById('downloadReadyBox').scrollIntoView({ behavior: 'smooth' });
+            } else {
+                alert(data.error || 'Failed to generate EPUB');
+            }
+        }
     </script>
 </body>
 </html>
@@ -508,14 +620,22 @@ def api_inspect():
         pipeline = NovelPipeline(url=url)
         metadata = pipeline.get_novel_info()
         return jsonify(metadata.to_dict())
+    except BotProtectionError as bpe:
+        return jsonify({
+            "error": bpe.reason,
+            "is_bot_protected": True,
+            "domain": bpe.domain
+        }), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        err_msg = str(e)
+        is_bot = "525" in err_msg or "cloudflare" in err_msg.lower() or "bot" in err_msg.lower() or "shield" in err_msg.lower()
+        return jsonify({
+            "error": err_msg,
+            "is_bot_protected": is_bot
+        }), 500
 
 @app.route("/api/chapter", methods=["POST"])
 def api_chapter():
-    """
-    Stateless chapter fetcher (Vercel-safe).
-    """
     data = request.json or {}
     url = data.get("url", "").strip()
     title = data.get("title", "")
@@ -530,15 +650,13 @@ def api_chapter():
         if not content.title or not content.title.strip():
             content.title = title or f"Chapter {number}"
         return jsonify(content.to_dict())
+    except BotProtectionError as bpe:
+        return jsonify({"error": bpe.reason, "is_bot_protected": True}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/batch-chapters", methods=["POST"])
 def api_batch_chapters():
-    """
-    Fetches a small batch of chapters concurrently (5-10 chapters per call).
-    Designed to complete well within Vercel's 10-second timeout.
-    """
     data = request.json or {}
     chapters_data = data.get("chapters", [])
     if not chapters_data:
@@ -573,10 +691,6 @@ def api_batch_chapters():
 
 @app.route("/api/export-bundle", methods=["POST"])
 def api_export_bundle():
-    """
-    Takes inspected metadata + fetched chapters and builds the requested format
-    (EPUB, TXT, or MD) and saves to temporary directory for download.
-    """
     data = request.json or {}
     meta_dict = data.get("metadata", {})
     chapters_dict_list = data.get("chapters", [])
@@ -593,8 +707,8 @@ def api_export_bundle():
     cover_bytes = None
     if metadata.cover_url:
         try:
-            import requests
-            resp = requests.get(metadata.cover_url, timeout=8)
+            from curl_cffi import requests as cffi_requests
+            resp = cffi_requests.get(metadata.cover_url, impersonate="chrome120", timeout=8)
             if resp.status_code == 200:
                 cover_bytes = resp.content
         except Exception:
@@ -633,6 +747,38 @@ def api_export_bundle():
         "status": "ready",
         "filename": filename
     })
+
+@app.route("/api/quick-convert", methods=["POST"])
+def api_quick_convert():
+    """Direct conversion of pasted text into EPUB."""
+    data = request.json or {}
+    title = data.get("title", "Custom Novel").strip()
+    author = data.get("author", "Author").strip()
+    ch_title = data.get("chapter_title", "Chapter 1").strip()
+    content_text = data.get("content", "").strip()
+
+    if not content_text:
+        return jsonify({"error": "Content cannot be empty"}), 400
+
+    paragraphs = [p.strip() for p in content_text.split("\n") if p.strip()]
+
+    meta = NovelMetadata(
+        title=title,
+        slug=title.lower().replace(" ", "-"),
+        url="custom",
+        author=author,
+        description="Directly generated from text import.",
+        categories=["Custom Import"]
+    )
+    ch = ChapterContent(number=1, title=ch_title, url="custom", paragraphs=paragraphs)
+    exporter = NovelExporter(meta, [ch])
+
+    safe_title = "".join(c for c in title if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+    filename = f"{safe_title}_Custom.epub"
+    out_path = OUTPUT_DIR / filename
+
+    exporter.export_epub(out_path)
+    return jsonify({"status": "ready", "filename": filename})
 
 @app.route("/api/file/<path:filename>")
 def api_file(filename):

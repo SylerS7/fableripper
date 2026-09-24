@@ -1,23 +1,17 @@
 import re
-import time
 import logging
 from urllib.parse import urljoin, urlparse
 from typing import List, Optional
-import requests
 from bs4 import BeautifulSoup
 
-from config import DEFAULT_HEADERS, REQUEST_TIMEOUT, MAX_RETRIES, RETRY_DELAY
 from .base import BaseScraper, NovelMetadata, ChapterInfo, ChapterContent
 from .extractor import clean_chapter_soup
+from .fetcher import smart_fetch
 
 logger = logging.getLogger(__name__)
 
 class NovelFullScraper(BaseScraper):
     name = "NovelFull"
-
-    def __init__(self, session: Optional[requests.Session] = None):
-        self.session = session or requests.Session()
-        self.session.headers.update(DEFAULT_HEADERS)
 
     def can_handle(self, url: str) -> bool:
         u = url.lower()
@@ -30,19 +24,8 @@ class NovelFullScraper(BaseScraper):
         return slug or "novelfull-novel"
 
     def _fetch_html(self, url: str) -> str:
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
-                resp.encoding = "utf-8"
-                if resp.status_code == 200:
-                    return resp.text
-                elif resp.status_code == 404:
-                    return ""
-            except requests.RequestException as e:
-                logger.warning(f"Error fetching {url}: {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAY * attempt)
-        raise RuntimeError(f"Failed to fetch {url}")
+        html, code = smart_fetch(url)
+        return html if code == 200 else ""
 
     def get_novel_metadata(self, url: str, on_progress=None) -> NovelMetadata:
         slug = self.parse_slug(url)
@@ -54,7 +37,7 @@ class NovelFullScraper(BaseScraper):
         title_el = soup.select_one("h3.title") or soup.select_one(".books .title") or soup.select_one("h1")
         title = title_el.get_text(strip=True) if title_el else slug.replace("-", " ").title()
 
-        author_el = soup.select_one("a[href*='/author/']") or soup.select_one(".info span:-soup-contains('Author') + a")
+        author_el = soup.select_one("a[href*='/author/']")
         author = author_el.get_text(strip=True) if author_el else "Unknown"
 
         desc_el = soup.select_one(".desc-text") or soup.select_one("#tab-description")
@@ -73,7 +56,6 @@ class NovelFullScraper(BaseScraper):
             if a.get_text(strip=True)
         ]
 
-        # Chapters from list
         chapters: List[ChapterInfo] = []
         ch_links = soup.select(".list-chapter li a") or soup.select("#list-chapter a")
         for idx, a in enumerate(ch_links, start=1):
