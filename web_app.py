@@ -31,6 +31,14 @@ INDEX_HTML = """<!DOCTYPE html>
         .reader-text { font-family: 'Literata', 'Merriweather', serif; }
         .hide-scrollbar::-webkit-scrollbar { display: none; }
         .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        /* Format & Split picker buttons */
+        .fmt-btn { background: rgba(15,23,42,0.8); border-color: rgb(30,41,59); color: #94a3b8; }
+        .fmt-btn:hover { background: rgb(30,41,59); border-color: rgb(51,65,85); color: #e2e8f0; }
+        .fmt-btn.active-fmt { background: rgba(6,182,212,0.12); border-color: rgba(6,182,212,0.5); color: #22d3ee; }
+        .fmt-btn.active-fmt i { color: #22d3ee; }
+        .split-btn { background: transparent; border-color: rgb(30,41,59); color: #64748b; }
+        .split-btn:hover { background: rgb(30,41,59); color: #e2e8f0; border-color: rgb(51,65,85); }
+        .split-btn.active-split { background: rgba(6,182,212,0.12); border-color: rgba(6,182,212,0.5); color: #22d3ee; }
     </style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen selection:bg-cyan-500 selection:text-white pb-16">
@@ -143,47 +151,98 @@ INDEX_HTML = """<!DOCTYPE html>
 
                 <!-- Export & Conversion Configurations -->
                 <div class="mt-8 pt-8 border-t border-slate-800/80">
-                    <h3 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-4 flex items-center gap-2">
+                    <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-5 flex items-center gap-2">
                         <i class="fas fa-sliders text-cyan-400"></i> Export & Download Options
                     </h3>
-                    
-                    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                        <div>
-                            <label class="block text-xs font-medium text-slate-400 mb-1.5">Start Chapter</label>
-                            <input type="number" id="startCh" placeholder="1" min="1" 
-                                   class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:ring-1 focus:ring-cyan-500 focus:outline-none">
+
+                    <!-- Chapter Range Row -->
+                    <div class="flex flex-col sm:flex-row gap-3 mb-5">
+                        <div class="flex-1">
+                            <label class="block text-xs font-medium text-slate-400 mb-1.5">From Chapter</label>
+                            <div class="relative">
+                                <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500 text-xs font-bold">#</span>
+                                <input type="number" id="startCh" placeholder="1" min="1"
+                                       class="w-full pl-7 pr-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500/50 focus:outline-none transition">
+                            </div>
                         </div>
-                        <div>
-                            <label class="block text-xs font-medium text-slate-400 mb-1.5">End Chapter</label>
-                            <input type="number" id="endCh" placeholder="All" min="1" 
-                                   class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:ring-1 focus:ring-cyan-500 focus:outline-none">
+                        <div class="hidden sm:flex items-end pb-2 text-slate-600">—</div>
+                        <div class="flex-1">
+                            <label class="block text-xs font-medium text-slate-400 mb-1.5">To Chapter</label>
+                            <div class="relative">
+                                <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500 text-xs font-bold">#</span>
+                                <input type="number" id="endCh" placeholder="All" min="1"
+                                       class="w-full pl-7 pr-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500/50 focus:outline-none transition">
+                            </div>
                         </div>
-                        <div>
-                            <label class="block text-xs font-medium text-slate-400 mb-1.5">Format</label>
-                            <select id="exportFormat" class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:ring-1 focus:ring-cyan-500 focus:outline-none">
-                                <option value="epub" selected>EPUB (Kindle/Apple Books)</option>
-                                <option value="txt">Clean TXT (Screen readers)</option>
-                                <option value="md">Markdown (Obsidian/Notion)</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-slate-400 mb-1.5">Volume Split</label>
-                            <select id="volumeSplit" class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:ring-1 focus:ring-cyan-500 focus:outline-none">
-                                <option value="0" selected>Single File (All in 1)</option>
-                                <option value="50">Split every 50 chapters</option>
-                                <option value="100">Split every 100 chapters</option>
-                                <option value="200">Split every 200 chapters</option>
-                            </select>
+                        <div class="hidden sm:flex items-end">
+                            <button onclick="setAllChapters()" class="py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold border border-slate-700 transition whitespace-nowrap">
+                                All
+                            </button>
                         </div>
                     </div>
 
-                    <!-- Action Trigger -->
-                    <div class="mt-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-                        <div class="text-xs text-slate-400 flex items-center gap-2">
-                            <i class="fas fa-bolt text-amber-400"></i>
-                            <span>Smart chunking enabled for Vercel & mobile browsers.</span>
+                    <!-- Format Picker -->
+                    <div class="mb-5">
+                        <label class="block text-xs font-medium text-slate-400 mb-2">Output Format</label>
+                        <div class="grid grid-cols-3 gap-2" id="formatPicker">
+                            <button onclick="setFormat('epub')" data-fmt="epub"
+                                    class="fmt-btn active-fmt flex flex-col items-center gap-1.5 p-3 rounded-xl border text-center transition cursor-pointer">
+                                <i class="fas fa-book text-sm"></i>
+                                <span class="text-xs font-bold">EPUB</span>
+                                <span class="text-[10px] text-slate-400 leading-snug">Kindle · Apple Books</span>
+                            </button>
+                            <button onclick="setFormat('txt')" data-fmt="txt"
+                                    class="fmt-btn flex flex-col items-center gap-1.5 p-3 rounded-xl border text-center transition cursor-pointer">
+                                <i class="fas fa-file-lines text-sm"></i>
+                                <span class="text-xs font-bold">Plain TXT</span>
+                                <span class="text-[10px] text-slate-400 leading-snug">Any device</span>
+                            </button>
+                            <button onclick="setFormat('md')" data-fmt="md"
+                                    class="fmt-btn flex flex-col items-center gap-1.5 p-3 rounded-xl border text-center transition cursor-pointer">
+                                <i class="fab fa-markdown text-sm"></i>
+                                <span class="text-xs font-bold">Markdown</span>
+                                <span class="text-[10px] text-slate-400 leading-snug">Obsidian · Notion</span>
+                            </button>
                         </div>
-                        <button id="downloadBtn" onclick="startExport()" class="w-full sm:w-auto px-8 py-3.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold rounded-2xl shadow-lg shadow-cyan-500/25 transition flex items-center justify-center gap-2 cursor-pointer">
+                        <input type="hidden" id="exportFormat" value="epub">
+                    </div>
+
+                    <!-- Volume Split Picker -->
+                    <div class="mb-6">
+                        <label class="block text-xs font-medium text-slate-400 mb-2">Volume Split</label>
+                        <div class="flex flex-wrap gap-2" id="splitPicker">
+                            <button onclick="setSplit(0)" data-split="0"
+                                    class="split-btn active-split px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer">
+                                Single File
+                            </button>
+                            <button onclick="setSplit(50)" data-split="50"
+                                    class="split-btn px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer">
+                                50 / vol
+                            </button>
+                            <button onclick="setSplit(100)" data-split="100"
+                                    class="split-btn px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer">
+                                100 / vol
+                            </button>
+                            <button onclick="setSplit(200)" data-split="200"
+                                    class="split-btn px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer">
+                                200 / vol
+                            </button>
+                            <button onclick="setSplit(500)" data-split="500"
+                                    class="split-btn px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer">
+                                500 / vol
+                            </button>
+                        </div>
+                        <input type="hidden" id="volumeSplit" value="0">
+                    </div>
+
+                    <!-- Action Row -->
+                    <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                        <p class="text-[11px] text-slate-500 flex items-center gap-1.5">
+                            <i class="fas fa-bolt text-amber-400/80 text-xs"></i>
+                            Chapters fetched in smart batches — safe on mobile & Vercel.
+                        </p>
+                        <button id="downloadBtn" onclick="startExport()"
+                                class="w-full sm:w-auto px-8 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-2xl shadow-lg shadow-cyan-500/20 transition flex items-center justify-center gap-2 cursor-pointer">
                             <i class="fas fa-cloud-arrow-down"></i>
                             <span>Download E-Book</span>
                         </button>
@@ -325,6 +384,29 @@ INDEX_HTML = """<!DOCTYPE html>
         let inspectedNovel = null;
         let currentReaderChapterIndex = 0;
         let readerFontSize = 18;
+
+        // Format picker
+        function setFormat(fmt) {
+            document.getElementById('exportFormat').value = fmt;
+            document.querySelectorAll('.fmt-btn').forEach(b => {
+                b.classList.toggle('active-fmt', b.dataset.fmt === fmt);
+            });
+        }
+
+        // Split picker
+        function setSplit(val) {
+            document.getElementById('volumeSplit').value = val;
+            document.querySelectorAll('.split-btn').forEach(b => {
+                b.classList.toggle('active-split', parseInt(b.dataset.split) === val);
+            });
+        }
+
+        // Set full chapter range
+        function setAllChapters() {
+            if (!inspectedNovel) return;
+            document.getElementById('startCh').value = 1;
+            document.getElementById('endCh').value = '';
+        }
 
         function showError(title, message, suggestion = '') {
             document.getElementById('errorTitle').innerText = title;
