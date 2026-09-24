@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 from scraper.base import NovelMetadata, ChapterContent
+from scraper.extractor import clean_title_str, clean_text_line
 from .builder import EpubBuilder
 
 class NovelExporter:
@@ -37,18 +38,19 @@ class NovelExporter:
         ]
 
         for ch in self.chapters:
-            lines.append(f"- {ch.title}")
+            lines.append(f"- {clean_title_str(ch.title)}")
 
         lines.append("\n" + "=" * 60)
         lines.append("CONTENT")
         lines.append("=" * 60 + "\n")
 
         for ch in self.chapters:
+            c_title = clean_title_str(ch.title)
             lines.append(f"\n\n{'#' * 40}")
-            lines.append(f"{ch.title}")
+            lines.append(f"{c_title}")
             lines.append(f"{'#' * 40}\n")
             for p in ch.paragraphs:
-                lines.append(p + "\n")
+                lines.append(clean_text_line(p) + "\n")
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -78,16 +80,17 @@ class NovelExporter:
 
         for idx, ch in enumerate(self.chapters, start=1):
             anchor = f"chapter-{ch.number}"
-            lines.append(f"{idx}. [{ch.title}](#{anchor})")
+            lines.append(f"{idx}. [{clean_title_str(ch.title)}](#{anchor})")
 
         lines.append("\n---\n")
 
         for ch in self.chapters:
             anchor = f"chapter-{ch.number}"
+            c_title = clean_title_str(ch.title)
             lines.append(f'<a id="{anchor}"></a>')
-            lines.append(f"## {ch.title}\n")
+            lines.append(f"## {c_title}\n")
             for p in ch.paragraphs:
-                lines.append(p + "\n")
+                lines.append(clean_text_line(p) + "\n")
             lines.append("\n---\n")
 
         with open(output_path, "w", encoding="utf-8") as f:

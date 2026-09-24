@@ -2,7 +2,7 @@ import re
 import json
 import logging
 from urllib.parse import urljoin, urlparse
-from typing import List
+from typing import List, Optional
 from bs4 import BeautifulSoup
 
 from .base import BaseScraper, NovelMetadata, ChapterInfo, ChapterContent
@@ -23,12 +23,20 @@ class UniversalScraper(BaseScraper):
         parts = [p for p in path.split("/") if p]
         if parts:
             clean = re.sub(r"\.(html|htm|php|aspx)$", "", parts[-1])
+            # If last part is a chapter number, use the parent part
+            if re.search(r"^chapter[-_]?\d+", clean, re.I) and len(parts) >= 2:
+                clean = re.sub(r"\.(html|htm|php|aspx)$", "", parts[-2])
             clean = re.sub(r"[^\w\-]", "-", clean)
             return clean.lower() or "novel"
         return parsed.netloc.replace(".", "-")
 
+    def detect_chapter_number(self, url: str) -> Optional[int]:
+        m = re.search(r"/chapter[-_]?(\d+)", url, re.I) or re.search(r"_(\d+)\.html", url, re.I)
+        if m:
+            return int(m.group(1))
+        return None
+
     def _check_bot_protected(self, url: str):
-        """Pre-flight check: raise helpful error for known bot-protected domains."""
         domain = urlparse(url).netloc
         for protected_domain, reason in BOT_PROTECTED_DOMAINS.items():
             if protected_domain in domain:
@@ -42,10 +50,29 @@ class UniversalScraper(BaseScraper):
     def get_novel_metadata(self, url: str, on_progress=None) -> NovelMetadata:
         self._check_bot_protected(url)
         slug = self.parse_slug(url)
+        req_ch = self.detect_chapter_number(url)
         parsed = urlparse(url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
+
         html_doc = self._fetch_html(url)
         soup = BeautifulSoup(html_doc, "html.parser")
+
+        # If a chapter URL was passed, try to discover parent novel page for full info
+        if req_ch:
+            # Check for link to index / novel page
+            index_link = (
+                soup.select_one("a[href*='/novel/']:not([href*='_']), a[href*='/book/']:not([href*='chapter'])")
+                or soup.select_one("a.index, a.novel-link, .breadcrumb a:nth-last-child(2)")
+            )
+            if index_link and index_link.get("href"):
+                parent_url = urljoin(base_url, index_link["href"])
+                try:
+                    parent_html = self._fetch_html(parent_url)
+                    if parent_html:
+                        soup = BeautifulSoup(parent_html, "html.parser")
+                        url = parent_url
+                except Exception:
+                    pass
 
         # Title
         title = ""
@@ -76,9 +103,9 @@ class UniversalScraper(BaseScraper):
 
         # Description
         description = ""
-        og_desc = soup.find("meta", property="og:description") or soup.find("meta", attrs={"name": "description"})
-        if og_desc and og_desc.get("content"):
-            description = og_desc["content"].strip()
+        meta_desc = soup.find("meta", itemprop="description") or soup.find("meta", property="og:description") or soup.find("meta", attrs={"name": "description"})
+        if meta_desc and meta_desc.get("content"):
+            description = meta_desc["content"].strip()
         else:
             desc_container = soup.find(attrs={"class": re.compile(r"synopsis|summary|description|intro", re.I)})
             if desc_container:
@@ -124,7 +151,7 @@ class UniversalScraper(BaseScraper):
             chapter_infos.append(ChapterInfo(index=idx, number=num, title=ch_title, url=ch_url))
 
         if not chapter_infos:
-            chapter_infos.append(ChapterInfo(index=1, number=1, title=title or "Chapter 1", url=url))
+            chapter_infos.append(ChapterInfo(index=1, number=req_ch or 1, title=title or f"Chapter {req_ch or 1}", url=url))
 
         return NovelMetadata(
             title=title,
@@ -135,7 +162,8 @@ class UniversalScraper(BaseScraper):
             description=description,
             cover_url=cover_url,
             categories=[],
-            chapters=chapter_infos
+            chapters=chapter_infos,
+            requested_chapter=req_ch
         )
 
     def get_chapter_content(self, url: str) -> ChapterContent:
@@ -153,6 +181,8 @@ class UniversalScraper(BaseScraper):
                 title = title_tag.get_text(strip=True)
 
         m_num = re.search(r"chapter\s*(\d+)", title, re.I) if title else None
+        if not m_num:
+            m_num = re.search(r"/chapter[-_]?(\d+)", url, re.I)
         num = int(m_num.group(1)) if m_num else 1
 
         candidate = (

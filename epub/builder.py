@@ -7,7 +7,7 @@ from ebooklib import epub
 
 from config import BASE_DIR
 from scraper.base import NovelMetadata, ChapterContent
-from scraper.extractor import paragraphs_to_xhtml
+from scraper.extractor import paragraphs_to_xhtml, clean_title_str
 
 class EpubBuilder:
     def __init__(self, metadata: NovelMetadata):
@@ -84,16 +84,17 @@ class EpubBuilder:
         total = len(self.chapters_content)
 
         for idx, ch in enumerate(self.chapters_content, start=1):
+            clean_ch_title = clean_title_str(ch.title) or f"Chapter {ch.number}"
             if on_progress and (idx % 25 == 0 or idx == total or idx == 1):
-                on_progress(f"Processing chapter {idx}/{total}: {ch.title}...")
+                on_progress(f"Processing chapter {idx}/{total}: {clean_ch_title}...")
 
             file_name = f"Text/chapter_{ch.number:05d}.xhtml"
             ch_item = epub.EpubHtml(
-                title=ch.title,
+                title=clean_ch_title,
                 file_name=file_name,
                 lang="en"
             )
-            ch_item.content = paragraphs_to_xhtml(ch.title, ch.paragraphs).encode("utf-8")
+            ch_item.content = paragraphs_to_xhtml(clean_ch_title, ch.paragraphs).encode("utf-8")
             ch_item.add_item(style_item)
             
             self.book.add_item(ch_item)

@@ -20,6 +20,7 @@ class NovelMetadata:
     cover_url: Optional[str] = None
     categories: List[str] = field(default_factory=list)
     chapters: List[ChapterInfo] = field(default_factory=list)
+    requested_chapter: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -31,6 +32,7 @@ class NovelMetadata:
             "description": self.description,
             "cover_url": self.cover_url,
             "categories": self.categories,
+            "requested_chapter": self.requested_chapter,
             "chapters": [
                 {
                     "index": ch.index,
@@ -62,6 +64,7 @@ class NovelMetadata:
             description=data.get("description", ""),
             cover_url=data.get("cover_url"),
             categories=data.get("categories", []),
+            requested_chapter=data.get("requested_chapter"),
             chapters=chapters
         )
 

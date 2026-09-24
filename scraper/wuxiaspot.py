@@ -2,11 +2,12 @@ import re
 import logging
 from urllib.parse import urljoin, urlparse
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 
 from .base import BaseScraper, NovelMetadata, ChapterInfo, ChapterContent
-from .extractor import clean_chapter_soup
-from .fetcher import smart_fetch, BotProtectionError
+from .extractor import clean_chapter_soup, clean_title_str
+from .fetcher import smart_fetch
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +28,20 @@ class WuxiaSpotScraper(BaseScraper):
         slug = re.sub(r"_\d+$", "", slug)
         return slug
 
+    def detect_chapter_number(self, url: str) -> Optional[int]:
+        m = re.search(r"_(\d+)\.html", url)
+        if m:
+            return int(m.group(1))
+        return None
+
     def _fetch_html(self, url: str) -> str:
         html, code = smart_fetch(url)
-        if code == 404:
-            return ""
-        return html
+        return html if code == 200 else ""
 
     def get_novel_metadata(self, url: str, on_progress=None) -> NovelMetadata:
         slug = self.parse_slug(url)
+        req_ch = self.detect_chapter_number(url)
+
         main_url = f"{self.BASE_URL}/novel/{slug}.html"
         logger.info(f"Fetching metadata for novel slug: {slug}")
         
@@ -66,7 +73,8 @@ class WuxiaSpotScraper(BaseScraper):
             if c_text and c_text not in categories:
                 categories.append(c_text)
 
-        chapters = self._fetch_all_chapters(slug, on_progress=on_progress)
+        # Fast parallel pagination
+        chapters = self._fetch_all_chapters_fast(slug, soup, on_progress=on_progress)
 
         return NovelMetadata(
             title=title,
@@ -77,44 +85,33 @@ class WuxiaSpotScraper(BaseScraper):
             description=description,
             cover_url=cover_url,
             categories=categories,
-            chapters=chapters
+            chapters=chapters,
+            requested_chapter=req_ch
         )
 
-    def _fetch_all_chapters(self, slug: str, on_progress=None) -> List[ChapterInfo]:
-        chapters: List[ChapterInfo] = []
-        page = 0
-        consecutive_empty = 0
+    def _fetch_all_chapters_fast(self, slug: str, main_soup: BeautifulSoup, on_progress=None) -> List[ChapterInfo]:
+        """
+        Discovers total pages from main page pagination and loads all chapter pages concurrently.
+        """
+        max_page = 0
+        for a in main_soup.select(".pagination a"):
+            m = re.search(r"page=(\d+)", a.get("href", ""))
+            if m:
+                p_num = int(m.group(1))
+                if p_num > max_page:
+                    max_page = p_num
 
-        while True:
-            fy_url = f"{self.BASE_URL}/e/extend/fy.php?page={page}&wjm={slug}"
-            try:
-                html_doc = self._fetch_html(fy_url)
-            except Exception as e:
-                logger.error(f"Error fetching chapter page {page}: {e}")
-                break
-
-            if not html_doc or len(html_doc.strip()) == 0:
-                break
-
-            soup = BeautifulSoup(html_doc, "html.parser")
-            items = soup.select(".chapter-list li a")
-            if not items:
-                items = soup.select("ul.chapter-list a")
-
-            if not items:
-                consecutive_empty += 1
-                if consecutive_empty >= 2:
-                    break
-                page += 1
-                continue
-
-            consecutive_empty = 0
+        def extract_page_chapters(html: str) -> List[tuple]:
+            res = []
+            if not html:
+                return res
+            s = BeautifulSoup(html, "html.parser")
+            items = s.select(".chapter-list li a") or s.select("ul.chapter-list a")
             for item in items:
                 href = item.get("href", "")
                 if not href:
                     continue
                 full_url = urljoin(self.BASE_URL, href)
-                
                 title_el = item.select_one(".chapter-title") or item.select_one("strong")
                 title = title_el.get_text(strip=True) if title_el else item.get("title") or item.get_text(strip=True)
                 
@@ -124,41 +121,44 @@ class WuxiaSpotScraper(BaseScraper):
                     m = re.search(r"(\d+)", ch_no_el.get_text())
                     if m:
                         num = int(m.group(1))
-
                 if num is None:
                     m = re.search(r"_(\d+)\.html", href)
                     if m:
                         num = int(m.group(1))
-                    else:
-                        m_title = re.search(r"chapter\s*(\d+)", title, re.I)
-                        if m_title:
-                            num = int(m_title.group(1))
-                        else:
-                            num = len(chapters) + 1
+                res.append((num or 0, clean_title_str(title) or title, full_url))
+            return res
 
-                chapters.append(ChapterInfo(
-                    index=len(chapters) + 1,
-                    number=num,
-                    title=title,
-                    url=full_url
-                ))
-
+        all_raw = []
+        if max_page == 0:
+            # Fallback single page
+            p0_url = f"{self.BASE_URL}/e/extend/fy.php?page=0&wjm={slug}"
+            all_raw = extract_page_chapters(self._fetch_html(p0_url))
+        else:
             if on_progress:
-                on_progress(f"Discovered {len(chapters)} chapters (page {page + 1})...")
+                on_progress(f"Discovered {max_page + 1} chapter pages. Loading in parallel...")
 
-            if len(items) < 100:
-                break
+            def fetch_single_page(p: int):
+                url = f"{self.BASE_URL}/e/extend/fy.php?page={p}&wjm={slug}"
+                return extract_page_chapters(self._fetch_html(url))
 
-            page += 1
+            with ThreadPoolExecutor(max_workers=min(12, max_page + 1)) as executor:
+                for page_res in executor.map(fetch_single_page, range(0, max_page + 1)):
+                    all_raw.extend(page_res)
 
-        unique_chapters = {}
-        for ch in chapters:
-            if ch.number not in unique_chapters:
-                unique_chapters[ch.number] = ch
+        unique = {}
+        for num, title, url in all_raw:
+            if num not in unique:
+                unique[num] = (num, title, url)
 
-        sorted_chapters = sorted(unique_chapters.values(), key=lambda c: c.number)
-        for idx, ch in enumerate(sorted_chapters, start=1):
-            ch.index = idx
+        sorted_chapters = []
+        for idx, (num, title, url) in enumerate(sorted(unique.values(), key=lambda x: x[0]), start=1):
+            ch_num = num if num > 0 else idx
+            sorted_chapters.append(ChapterInfo(
+                index=idx,
+                number=ch_num,
+                title=title or f"Chapter {ch_num}",
+                url=url
+            ))
 
         return sorted_chapters
 
@@ -167,7 +167,8 @@ class WuxiaSpotScraper(BaseScraper):
         soup = BeautifulSoup(html_doc, "html.parser")
 
         title_el = soup.select_one(".chapter-header h2") or soup.select_one("h2") or soup.select_one("h1")
-        title = title_el.get_text(strip=True) if title_el else ""
+        raw_title = title_el.get_text(strip=True) if title_el else ""
+        title = clean_title_str(raw_title)
 
         m_num = re.search(r"_(\d+)\.html", url)
         num = int(m_num.group(1)) if m_num else 0
