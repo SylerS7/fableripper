@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local scrapers cache & outputs
+.cache/
+output/
+.vercel/
+
+# Environment
+.env
+.env.local
+venv/
+env/
