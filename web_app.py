@@ -529,18 +529,25 @@ INDEX_HTML = """<!DOCTYPE html>
                 const chaptersToFetch = inspectedNovel.chapters.filter(ch => ch.number >= startCh && ch.number <= endCh);
                 if (chaptersToFetch.length === 0) throw new Error('No chapters in the selected range.');
 
-                const batchSize = 6;
+                const isNovelFire = (inspectedNovel.platform || '').toLowerCase().includes('novelfire') ||
+                                    (inspectedNovel.url || '').includes('novelfire.net');
+                // Use batch size 10 for rate-limited NovelFire with polite pacing; batch size 25 for fast platforms
+                const batchSize = isNovelFire ? 10 : 25;
                 const fetchedChapters = [];
                 const total = chaptersToFetch.length;
 
                 for (let i = 0; i < total; i += batchSize) {
                     const chunk = chaptersToFetch.slice(i, i + batchSize);
-                    document.getElementById('progressMessage').innerText = `Fetching chapters ${i + 1} to ${Math.min(i + batchSize, total)} of ${total}...`;
+                    const modeSuffix = isNovelFire ? ' [Paced Mode]' : '';
+                    document.getElementById('progressMessage').innerText = `Fetching chapters ${i + 1} to ${Math.min(i + chunk.length, total)} of ${total}${modeSuffix}...`;
 
                     const batchRes = await fetch('/api/batch-chapters', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ chapters: chunk })
+                        body: JSON.stringify({
+                            chapters: chunk,
+                            slug: inspectedNovel.slug
+                        })
                     });
                     const batchData = await batchRes.json();
                     if (!batchRes.ok) throw new Error(batchData.error || 'Failed to fetch chapter batch');
@@ -740,8 +747,12 @@ def api_chapter():
 def api_batch_chapters():
     data = request.json or {}
     chapters_data = data.get("chapters", [])
+    slug = data.get("slug", "")
     if not chapters_data:
         return jsonify({"results": []})
+
+    from storage.cache import NovelCache
+    cache = NovelCache(slug) if slug else None
 
     results = []
     from concurrent.futures import ThreadPoolExecutor
@@ -750,12 +761,24 @@ def api_batch_chapters():
         url = ch.get("url")
         num = ch.get("number", 1)
         title = ch.get("title", f"Chapter {num}")
+
+        # Check local disk cache first
+        if cache and cache.has_chapter(num):
+            cached_ch = cache.get_chapter(num)
+            if cached_ch and cached_ch.get("paragraphs"):
+                first_p = cached_ch["paragraphs"][0]
+                if not first_p.startswith("[Content could not be retrieved"):
+                    return cached_ch
+
         scraper = get_scraper_for_url(url)
         try:
             content = scraper.get_chapter_content(url)
             if not content.title:
                 content.title = title
-            return content.to_dict()
+            ch_dict = content.to_dict()
+            if cache and content.paragraphs and not content.paragraphs[0].startswith("[Content could not be retrieved"):
+                cache.save_chapter(num, ch_dict)
+            return ch_dict
         except Exception as e:
             return {
                 "number": num,
@@ -764,7 +787,12 @@ def api_batch_chapters():
                 "paragraphs": [f"[Content could not be retrieved: {e}]"]
             }
 
-    with ThreadPoolExecutor(max_workers=min(len(chapters_data), 6)) as executor:
+    # Use 2 workers for rate-limited domains (e.g. novelfire.net) to avoid 429 lockouts
+    # Use up to 15 concurrent workers for high-speed sites (wuxiaspot, royalroad, novelfull)
+    is_rate_limited = any("novelfire.net" in (ch.get("url") or "") for ch in chapters_data)
+    max_workers = 2 if is_rate_limited else min(len(chapters_data), 15)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for item in executor.map(fetch_one, chapters_data):
             results.append(item)
 

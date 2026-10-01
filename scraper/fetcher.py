@@ -1,17 +1,29 @@
-import re
+"""
+Universal HTTP Fetcher with Cloudflare TLS Fingerprint Bypass and Rate-Limit Adaptation.
+Supports curl_cffi Chrome impersonation with automatic fallback and per-domain pacing.
+"""
+
 import time
 import logging
-from urllib.parse import urljoin, urlparse
-from typing import Optional, Tuple
+import threading
+from typing import Tuple, Optional
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# Sites known to use aggressive bot protection (Cloudflare, etc.)
-# These won't work with any automated scraping approach.
+# Known bot-protected domains that block automated scrapers at the network/TLS level
 BOT_PROTECTED_DOMAINS = {
-    "archiveofourown.org": "Archive of Our Own (AO3) uses Cloudflare bot protection that blocks automated access. Please download works manually from the AO3 website.",
-    "fanfiction.net": "FanFiction.net blocks automated scraping. Consider using an alternative mirror.",
-    "wattpad.com": "Wattpad blocks automated scraping.",
+    "archiveofourown.org": (
+        "Archive of Our Own (AO3) strictly blocks automated scrapers. "
+        "Please download the EPUB directly from the novel's page on AO3 using their built-in 'Download' button, "
+        "or use the 'Paste Text to EPUB' tool."
+    ),
+    "fanfiction.net": (
+        "FanFiction.net is protected by Cloudflare Under-Attack mode and blocks automated tools."
+    ),
+    "wattpad.com": (
+        "Wattpad requires login and uses Cloudflare protection to block scrapers."
+    ),
 }
 
 # Known Cloudflare / bot protection page markers
@@ -27,7 +39,38 @@ BOT_PROTECTION_MARKERS = [
     "security check",
     "human verification",
     "_cf_chl_opt",
+    "used cloudflare to restrict access",
+    "error 1015",
 ]
+
+# Per-domain pacing locks to prevent 429 rate-limiting
+_DOMAIN_LOCKS = {}
+_LAST_REQUEST_TIME = {}
+_LOCK = threading.Lock()
+
+
+def _get_domain_lock(domain: str) -> threading.Lock:
+    with _LOCK:
+        if domain not in _DOMAIN_LOCKS:
+            _DOMAIN_LOCKS[domain] = threading.Lock()
+        return _DOMAIN_LOCKS[domain]
+
+
+def _apply_domain_pacing(domain: str):
+    """
+    Apply pacing if domain has strict rate-limiting rules.
+    novelfire.net Cloudflare rate-limits if faster than ~1 request per 1.2s.
+    Other domains run without artificial delays.
+    """
+    if "novelfire.net" in domain:
+        lock = _get_domain_lock(domain)
+        with lock:
+            last = _LAST_REQUEST_TIME.get(domain, 0.0)
+            now = time.time()
+            elapsed = now - last
+            if elapsed < 1.25:
+                time.sleep(1.25 - elapsed)
+            _LAST_REQUEST_TIME[domain] = time.time()
 
 
 def is_bot_protected(html: str, status_code: int) -> bool:
@@ -58,11 +101,13 @@ def smart_fetch(url: str, timeout: int = 15, max_retries: int = 3, retry_delay: 
     Raises BotProtectionError or RuntimeError on failure.
     """
     domain = urlparse(url).netloc
+    last_code = 0
 
     # Strategy 1: curl_cffi with Chrome impersonation (bypasses basic TLS fingerprinting)
     try:
         from curl_cffi import requests as cffi_requests
         for attempt in range(1, max_retries + 1):
+            _apply_domain_pacing(domain)
             try:
                 resp = cffi_requests.get(
                     url,
@@ -76,16 +121,25 @@ def smart_fetch(url: str, timeout: int = 15, max_retries: int = 3, retry_delay: 
                 )
                 html = resp.text
                 code = resp.status_code
-
-                if is_bot_protected(html, code):
-                    reason = get_bot_protection_reason(domain)
-                    raise BotProtectionError(url, domain, reason)
+                last_code = code
 
                 if code == 200:
                     return html, code
 
                 if code in (404, 410):
                     return "", code
+
+                if code == 429:
+                    retry_after = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+                    wait_time = float(retry_after) if retry_after and retry_after.isdigit() else 2.5
+                    logger.warning(f"[curl_cffi] Rate limited (429) on {domain}. Waiting {wait_time}s (attempt {attempt}/{max_retries})")
+                    if attempt < max_retries:
+                        time.sleep(wait_time)
+                        continue
+
+                if is_bot_protected(html, code):
+                    reason = get_bot_protection_reason(domain)
+                    raise BotProtectionError(url, domain, reason)
 
                 logger.warning(f"[curl_cffi] HTTP {code} for {url} (attempt {attempt})")
 
@@ -100,7 +154,11 @@ def smart_fetch(url: str, timeout: int = 15, max_retries: int = 3, retry_delay: 
     except ImportError:
         logger.debug("curl_cffi not available, falling back to requests")
 
-    # Strategy 2: Regular requests (fallback)
+    # If curl_cffi failed due to rate-limiting (429), don't waste time retrying with requests
+    if last_code == 429:
+        raise RuntimeError(f"Rate limited by {domain} (HTTP 429). Please wait a moment before fetching more chapters.")
+
+    # Strategy 2: Regular requests (fallback for when curl_cffi is missing or for non-fingerprinted sites)
     try:
         import requests
         session = requests.Session()
@@ -108,21 +166,22 @@ def smart_fetch(url: str, timeout: int = 15, max_retries: int = 3, retry_delay: 
         session.headers.update(DEFAULT_HEADERS)
         
         for attempt in range(1, max_retries + 1):
+            _apply_domain_pacing(domain)
             try:
                 resp = session.get(url, timeout=timeout)
                 resp.encoding = resp.apparent_encoding or "utf-8"
                 html = resp.text
                 code = resp.status_code
 
-                if is_bot_protected(html, code):
-                    reason = get_bot_protection_reason(domain)
-                    raise BotProtectionError(url, domain, reason)
-
                 if code == 200:
                     return html, code
 
                 if code in (404, 410):
                     return "", code
+
+                if is_bot_protected(html, code):
+                    reason = get_bot_protection_reason(domain)
+                    raise BotProtectionError(url, domain, reason)
 
                 logger.warning(f"[requests] HTTP {code} for {url} (attempt {attempt})")
 

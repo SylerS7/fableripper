@@ -176,12 +176,14 @@ class NovelFireScraper(BaseScraper):
         num = int(m_num.group(1)) if m_num else 1
 
         content_div = (
-            soup.select_one("#chapter-container")
+            soup.select_one(".box-detail")
+            or soup.select_one("#chapter-container")
             or soup.select_one(".chapter-content")
             or soup.select_one("#content")
             or soup.select_one(".content")
         )
         paragraphs = clean_chapter_soup(content_div, chapter_title=title)
+        paragraphs = [p for p in paragraphs if not re.match(r"^\[\s*\.\.\.\s*words?\s*\]$", p.strip(), re.I)]
 
         return ChapterContent(
             number=num,

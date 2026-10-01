@@ -12,3 +12,5 @@ output/
 .env.local
 venv/
 env/
+
+.vercel
