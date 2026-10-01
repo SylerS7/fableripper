@@ -1,6 +1,7 @@
 """
 Universal HTTP Fetcher with Cloudflare TLS Fingerprint Bypass and Rate-Limit Adaptation.
 Supports curl_cffi Chrome impersonation with automatic fallback and per-domain pacing.
+Strategy 3: Jina Reader proxy (bypasses Cloudflare from datacenter/serverless IPs).
 """
 
 import time
@@ -26,6 +27,10 @@ BOT_PROTECTED_DOMAINS = {
     ),
 }
 
+# Domains where Jina Reader proxy should be used as the primary strategy
+# (Cloudflare-protected sites that block datacenter IPs like Vercel)
+JINA_PREFERRED_DOMAINS = ["novelfire.net", "webnovel.com"]
+
 # Known Cloudflare / bot protection page markers
 BOT_PROTECTION_MARKERS = [
     "shields are up",
@@ -48,6 +53,11 @@ _DOMAIN_LOCKS = {}
 _LAST_REQUEST_TIME = {}
 _LOCK = threading.Lock()
 
+# Detect if running on Vercel (serverless environment)
+def _is_vercel() -> bool:
+    import os
+    return bool(os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"))
+
 
 def _get_domain_lock(domain: str) -> threading.Lock:
     with _LOCK:
@@ -60,17 +70,24 @@ def _apply_domain_pacing(domain: str):
     """
     Apply pacing if domain has strict rate-limiting rules.
     novelfire.net Cloudflare rate-limits if faster than ~1 request per 1.2s.
+    jina.ai free tier: 20 req/min → 3 seconds between requests to be safe.
     Other domains run without artificial delays.
     """
     if "novelfire.net" in domain:
-        lock = _get_domain_lock(domain)
-        with lock:
-            last = _LAST_REQUEST_TIME.get(domain, 0.0)
-            now = time.time()
-            elapsed = now - last
-            if elapsed < 1.25:
-                time.sleep(1.25 - elapsed)
-            _LAST_REQUEST_TIME[domain] = time.time()
+        min_interval = 1.25
+    elif "jina.ai" in domain:
+        min_interval = 3.2
+    else:
+        return
+
+    lock = _get_domain_lock(domain)
+    with lock:
+        last = _LAST_REQUEST_TIME.get(domain, 0.0)
+        now = time.time()
+        elapsed = now - last
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        _LAST_REQUEST_TIME[domain] = time.time()
 
 
 def is_bot_protected(html: str, status_code: int) -> bool:
@@ -94,16 +111,63 @@ def get_bot_protection_reason(domain: str) -> str:
     )
 
 
+def _jina_fetch(url: str, timeout: int = 25) -> Tuple[str, int]:
+    """
+    Fetch a URL through the Jina Reader proxy (https://r.jina.ai/).
+    Returns full HTML so BeautifulSoup can parse it normally.
+    Free tier allows 20 req/min — pacing is applied via _apply_domain_pacing().
+    """
+    import urllib.request as _ureq
+
+    jina_url = f"https://r.jina.ai/{url}"
+    _apply_domain_pacing("r.jina.ai")
+
+    req = _ureq.Request(
+        jina_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,*/*",
+            "X-Return-Format": "html",
+            "X-Timeout": str(timeout - 5),
+        }
+    )
+    resp = _ureq.urlopen(req, timeout=timeout)
+    html = resp.read().decode("utf-8", errors="replace")
+    return html, 200
+
+
 def smart_fetch(url: str, timeout: int = 15, max_retries: int = 3, retry_delay: float = 1.0) -> Tuple[str, int]:
     """
     Multi-strategy HTTP fetcher with Cloudflare TLS fingerprint bypass.
     Returns (html_text, status_code).
     Raises BotProtectionError or RuntimeError on failure.
+
+    Strategy order:
+      1. Jina Reader proxy  — used first on Vercel for Cloudflare-protected domains
+      2. curl_cffi Chrome120  — bypasses TLS fingerprinting from local/residential IPs
+      3. Regular requests  — plain fallback for non-fingerprinted sites
+      4. Jina Reader proxy  — last-resort for any domain that failed above strategies
     """
     domain = urlparse(url).netloc
     last_code = 0
+    is_vercel = _is_vercel()
+    is_jina_preferred = any(d in domain for d in JINA_PREFERRED_DOMAINS)
 
-    # Strategy 1: curl_cffi with Chrome impersonation (bypasses basic TLS fingerprinting)
+    # ── Strategy 1: Jina Reader proxy (on Vercel for Cloudflare-protected domains) ──
+    # On Vercel, datacenter IPs are blocked by Cloudflare regardless of TLS tricks.
+    # Jina Reader proxies through clean residential-equivalent IPs and returns full HTML.
+    if is_vercel and is_jina_preferred:
+        try:
+            html, code = _jina_fetch(url, timeout=30)
+            if html and len(html) > 500:
+                logger.info(f"[jina/primary] Successfully fetched {url}")
+                return html, code
+        except Exception as e:
+            logger.warning(f"[jina/primary] Failed for {url}: {e} — falling through to curl_cffi")
+
+    # ── Strategy 2: curl_cffi with Chrome impersonation ──
+    # Bypasses basic TLS fingerprinting — works from residential/local IPs.
+    curl_failed_with_bot = False
     try:
         from curl_cffi import requests as cffi_requests
         for attempt in range(1, max_retries + 1):
@@ -138,13 +202,15 @@ def smart_fetch(url: str, timeout: int = 15, max_retries: int = 3, retry_delay: 
                         continue
 
                 if is_bot_protected(html, code):
-                    reason = get_bot_protection_reason(domain)
-                    raise BotProtectionError(url, domain, reason)
+                    curl_failed_with_bot = True
+                    logger.warning(f"[curl_cffi] Bot protection detected on {domain} (HTTP {code})")
+                    break  # Don't re-raise yet — try Jina fallback first
 
                 logger.warning(f"[curl_cffi] HTTP {code} for {url} (attempt {attempt})")
 
             except BotProtectionError:
-                raise
+                curl_failed_with_bot = True
+                break
             except Exception as e:
                 logger.warning(f"[curl_cffi] Error on {url}: {e} (attempt {attempt})")
 
@@ -158,43 +224,62 @@ def smart_fetch(url: str, timeout: int = 15, max_retries: int = 3, retry_delay: 
     if last_code == 429:
         raise RuntimeError(f"Rate limited by {domain} (HTTP 429). Please wait a moment before fetching more chapters.")
 
-    # Strategy 2: Regular requests (fallback for when curl_cffi is missing or for non-fingerprinted sites)
-    try:
-        import requests
-        session = requests.Session()
-        from config import DEFAULT_HEADERS
-        session.headers.update(DEFAULT_HEADERS)
-        
-        for attempt in range(1, max_retries + 1):
-            _apply_domain_pacing(domain)
-            try:
-                resp = session.get(url, timeout=timeout)
-                resp.encoding = resp.apparent_encoding or "utf-8"
-                html = resp.text
-                code = resp.status_code
+    # ── Strategy 3: Regular requests ──
+    # Fallback for when curl_cffi is missing or for sites without TLS fingerprinting.
+    # Skip for bot-protected domains where we know requests won't help.
+    if not curl_failed_with_bot:
+        try:
+            import requests
+            session = requests.Session()
+            from config import DEFAULT_HEADERS
+            session.headers.update(DEFAULT_HEADERS)
 
-                if code == 200:
-                    return html, code
+            for attempt in range(1, max_retries + 1):
+                _apply_domain_pacing(domain)
+                try:
+                    resp = session.get(url, timeout=timeout)
+                    resp.encoding = resp.apparent_encoding or "utf-8"
+                    html = resp.text
+                    code = resp.status_code
 
-                if code in (404, 410):
-                    return "", code
+                    if code == 200:
+                        return html, code
 
-                if is_bot_protected(html, code):
-                    reason = get_bot_protection_reason(domain)
-                    raise BotProtectionError(url, domain, reason)
+                    if code in (404, 410):
+                        return "", code
 
-                logger.warning(f"[requests] HTTP {code} for {url} (attempt {attempt})")
+                    if is_bot_protected(html, code):
+                        logger.warning(f"[requests] Bot protection detected on {domain} (HTTP {code})")
+                        break  # Fall through to Jina
 
-            except BotProtectionError:
-                raise
-            except requests.RequestException as e:
-                logger.warning(f"[requests] Error on {url}: {e} (attempt {attempt})")
+                    logger.warning(f"[requests] HTTP {code} for {url} (attempt {attempt})")
 
-            if attempt < max_retries:
-                time.sleep(retry_delay * attempt)
+                except requests.RequestException as e:
+                    logger.warning(f"[requests] Error on {url}: {e} (attempt {attempt})")
 
-    except ImportError:
-        pass
+                if attempt < max_retries:
+                    time.sleep(retry_delay * attempt)
+
+        except ImportError:
+            pass
+
+    # ── Strategy 4: Jina Reader proxy (last-resort for any domain) ──
+    # Used when curl_cffi + requests both fail due to bot protection.
+    # Also used as the universal fallback for any domain on Vercel.
+    if is_jina_preferred or curl_failed_with_bot or is_vercel:
+        try:
+            logger.info(f"[jina/fallback] Attempting Jina proxy for {url}")
+            html, code = _jina_fetch(url, timeout=30)
+            if html and len(html) > 500:
+                logger.info(f"[jina/fallback] Successfully fetched {url} via Jina Reader")
+                return html, code
+        except Exception as e:
+            logger.warning(f"[jina/fallback] Failed for {url}: {e}")
+
+    # All strategies exhausted — raise appropriate error
+    if curl_failed_with_bot or is_vercel:
+        reason = get_bot_protection_reason(domain)
+        raise BotProtectionError(url, domain, reason)
 
     raise RuntimeError(f"All fetch strategies failed for {url}")
 
