@@ -13,6 +13,8 @@ root_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root_dir))
 
 from scraper import get_scraper_for_url, NovelMetadata, ChapterInfo, ChapterContent
+from scraper.wuxiaworld import WuxiaWorldScraper
+from scraper.freewebnovel import FreeWebNovelScraper
 from scraper.wuxiaspot import WuxiaSpotScraper
 from scraper.royalroad import RoyalRoadScraper
 from scraper.universal import UniversalScraper
@@ -21,6 +23,14 @@ from web_app import app
 
 def test_scraper_resolution():
     print("Testing Scraper Resolution...")
+    sw = get_scraper_for_url("https://www.wuxiaworld.com/novel/perfect-world")
+    assert isinstance(sw, WuxiaWorldScraper), f"Expected WuxiaWorldScraper, got {type(sw)}"
+    print("✓ WuxiaWorld scraper resolved correctly")
+
+    sf = get_scraper_for_url("https://freewebnovel.com/novel/perfect-world")
+    assert isinstance(sf, FreeWebNovelScraper), f"Expected FreeWebNovelScraper, got {type(sf)}"
+    print("✓ FreeWebNovel scraper resolved correctly")
+
     s1 = get_scraper_for_url("https://www.wuxiaspot.com/novel/battle-through-the-heavens.html")
     assert isinstance(s1, WuxiaSpotScraper), f"Expected WuxiaSpotScraper, got {type(s1)}"
     print("✓ WuxiaSpot scraper resolved correctly")
