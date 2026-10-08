@@ -1,13 +1,18 @@
+import io
 import uuid
 import html
+import logging
 from pathlib import Path
 from typing import List, Optional, Callable
 import ebooklib
 from ebooklib import epub
+from PIL import Image
 
 from config import BASE_DIR
 from scraper.base import NovelMetadata, ChapterContent
 from scraper.extractor import paragraphs_to_xhtml, clean_title_str
+
+logger = logging.getLogger(__name__)
 
 class EpubBuilder:
     def __init__(self, metadata: NovelMetadata):
@@ -26,8 +31,25 @@ class EpubBuilder:
             self.css_content = "body { font-family: serif; line-height: 1.6; padding: 2%; }"
 
     def set_cover_data(self, cover_bytes: bytes, ext: str = "jpg") -> None:
-        self.cover_bytes = cover_bytes
-        self.cover_ext = ext
+        """
+        Stores cover bytes, converting any format (WebP, PNG, etc.) to standard baseline JPEG.
+        This ensures 100% compatibility across all mobile readers (Lithium, Moon+, Kindle, etc.).
+        """
+        if not cover_bytes:
+            return
+
+        try:
+            im = Image.open(io.BytesIO(cover_bytes))
+            if im.mode in ("RGBA", "P"):
+                im = im.convert("RGB")
+            out_io = io.BytesIO()
+            im.save(out_io, format="JPEG", quality=90)
+            self.cover_bytes = out_io.getvalue()
+            self.cover_ext = "jpg"
+        except Exception as e:
+            logger.warning(f"Could not convert cover image to JPEG via Pillow: {e}")
+            self.cover_bytes = cover_bytes
+            self.cover_ext = ext
 
     def add_chapter(self, chapter: ChapterContent) -> None:
         self.chapters_content.append(chapter)
@@ -62,14 +84,27 @@ class EpubBuilder:
         )
         self.book.add_item(style_item)
 
-        spine = ["nav"]
+        spine = []
 
-        # Cover image
+        # Cover page (if cover image is available)
         if self.cover_bytes:
             if on_progress:
                 on_progress("Embedding book cover...")
-            cover_filename = f"cover.{self.cover_ext}"
+            # Re-verify cover is valid JPEG
+            try:
+                im = Image.open(io.BytesIO(self.cover_bytes))
+                if im.format != "JPEG" or im.mode != "RGB":
+                    im = im.convert("RGB")
+                    buf = io.BytesIO()
+                    im.save(buf, format="JPEG", quality=90)
+                    self.cover_bytes = buf.getvalue()
+            except Exception:
+                pass
+
+            cover_filename = "cover.jpg"
             self.book.set_cover(cover_filename, self.cover_bytes)
+            # Add cover page to spine so it's not an orphaned manifest document
+            spine.append("cover")
 
         # About / Title Page
         if on_progress:
@@ -88,7 +123,7 @@ class EpubBuilder:
             if on_progress and (idx % 25 == 0 or idx == total or idx == 1):
                 on_progress(f"Processing chapter {idx}/{total}: {clean_ch_title}...")
 
-            file_name = f"Text/chapter_{ch.number:05d}.xhtml"
+            file_name = f"Text/chapter_{idx:05d}.xhtml"
             ch_item = epub.EpubHtml(
                 title=clean_ch_title,
                 file_name=file_name,
