@@ -706,7 +706,7 @@ def api_inspect():
 
     try:
         pipeline = NovelPipeline(url=url)
-        metadata = pipeline.get_novel_info()
+        metadata = pipeline.get_novel_info(force_refresh=True)
         return jsonify(metadata.to_dict())
     except BotProtectionError as bpe:
         return jsonify({
