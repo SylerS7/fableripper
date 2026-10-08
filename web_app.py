@@ -747,12 +747,18 @@ def api_chapter():
 def api_batch_chapters():
     data = request.json or {}
     chapters_data = data.get("chapters", [])
-    slug = data.get("slug", "")
+    raw_slug = data.get("slug", "")
     if not chapters_data:
         return jsonify({"results": []})
 
+    from urllib.parse import urlparse
+    # Domain-scoped caching: ensure cache never cross-pollinates different translations/sites
+    first_url = chapters_data[0].get("url", "") if chapters_data else ""
+    domain_prefix = urlparse(first_url).netloc.replace(".", "_").replace(":", "_") if first_url else "generic"
+    scoped_slug = f"{domain_prefix}_{raw_slug}" if raw_slug else ""
+
     from storage.cache import NovelCache
-    cache = NovelCache(slug) if slug else None
+    cache = NovelCache(scoped_slug) if scoped_slug else None
 
     results = []
     from concurrent.futures import ThreadPoolExecutor
@@ -762,12 +768,14 @@ def api_batch_chapters():
         num = ch.get("number", 1)
         title = ch.get("title", f"Chapter {num}")
 
-        # Check local disk cache first
+        # Check local disk cache first (ensuring matching domain)
         if cache and cache.has_chapter(num):
             cached_ch = cache.get_chapter(num)
             if cached_ch and cached_ch.get("paragraphs"):
+                cached_url = cached_ch.get("url", "")
+                same_site = not cached_url or not url or (urlparse(cached_url).netloc == urlparse(url).netloc)
                 first_p = cached_ch["paragraphs"][0]
-                if not first_p.startswith("[Content could not be retrieved"):
+                if same_site and not first_p.startswith("[Content could not be retrieved"):
                     return cached_ch
 
         scraper = get_scraper_for_url(url)
